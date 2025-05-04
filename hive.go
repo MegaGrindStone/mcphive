@@ -116,127 +116,6 @@ func callToolError(err error) json.RawMessage {
 	return res
 }
 
-func initializeConversation(messages []Message) []Message {
-	conversation := make([]Message, len(messages)+1)
-	copy(conversation, messages)
-	conversation[len(messages)] = Message{
-		Role: RoleAssistant,
-	}
-	return conversation
-}
-
-func processSingleLLMResponse(
-	ctx context.Context,
-	llm LLM,
-	conversation []Message,
-	tools []mcp.Tool,
-	yield func(Content, error) bool,
-) (Content, Content, bool) {
-	var textContent Content
-	textContent.Type = ContentTypeText
-
-	llmIter := llm.Call(ctx, conversation, tools)
-
-	for content, err := range llmIter {
-		if err != nil {
-			yield(Content{}, fmt.Errorf("failed to call llm: %w", err))
-			return Content{}, Content{}, false
-		}
-
-		switch content.Type {
-		case ContentTypeText:
-			textContent.Text += content.Text
-		case ContentTypeCallTool:
-			// Yield any accumulated text before tool call
-			if textContent.Text != "" {
-				lastMsg := &conversation[len(conversation)-1]
-				lastMsg.Contents = append(lastMsg.Contents, textContent)
-				if !yield(textContent, nil) {
-					return content, Content{}, false
-				}
-				textContent = Content{Type: ContentTypeText}
-			}
-
-			// Add tool call to conversation and yield it
-			lastMsg := &conversation[len(conversation)-1]
-			lastMsg.Contents = append(lastMsg.Contents, content)
-			if !yield(content, nil) {
-				return content, Content{}, false
-			}
-
-			return content, textContent, true
-
-		case ContentTypeToolResult:
-			yield(Content{}, fmt.Errorf("content type tool result not allowed"))
-			return Content{}, Content{}, false
-		default:
-			yield(Content{}, fmt.Errorf("unknown content type: %s", content.Type))
-			return Content{}, Content{}, false
-		}
-	}
-
-	// No tool call was made, return empty call tool content
-	return Content{}, textContent, true
-}
-
-func handleToolCall(
-	ctx context.Context,
-	h Hive,
-	conversation []Message,
-	lastMsgIndex int,
-	callToolContent Content,
-	yield func(Content, error) bool,
-) bool {
-	lastMsg := conversation[lastMsgIndex]
-
-	// Prepare container for tool result
-	toolResContent := Content{
-		Type:       ContentTypeToolResult,
-		CallToolID: callToolContent.CallToolID,
-	}
-
-	// Handle invalid tool input
-	if _, err := json.Marshal(callToolContent.ToolInput); err != nil {
-		toolResContent.ToolResult = callToolError(
-			fmt.Errorf("tool input %s is not valid json", string(callToolContent.ToolInput)))
-		toolResContent.CallToolFailed = true
-		lastMsg.Contents = append(lastMsg.Contents, toolResContent)
-		conversation[lastMsgIndex] = lastMsg
-		return yield(toolResContent, nil)
-	}
-
-	// Execute the requested tool
-	toolRes, err := h.callAllTool(ctx, mcp.CallToolParams{
-		Name:      callToolContent.ToolName,
-		Arguments: callToolContent.ToolInput,
-	})
-	// Handle tool execution error
-	if err != nil {
-		toolResContent.ToolResult = callToolError(err)
-		toolResContent.CallToolFailed = true
-		lastMsg.Contents = append(lastMsg.Contents, toolResContent)
-		conversation[lastMsgIndex] = lastMsg
-		return yield(toolResContent, nil)
-	}
-
-	// Serialize the tool result
-	resContent, err := json.Marshal(toolRes.Content)
-	if err != nil {
-		toolResContent.ToolResult = callToolError(err)
-		toolResContent.CallToolFailed = true
-		lastMsg.Contents = append(lastMsg.Contents, toolResContent)
-		conversation[lastMsgIndex] = lastMsg
-		return yield(toolResContent, nil)
-	}
-
-	// Record and yield successful tool result
-	toolResContent.ToolResult = resContent
-	toolResContent.CallToolFailed = false
-	lastMsg.Contents = append(lastMsg.Contents, toolResContent)
-	conversation[lastMsgIndex] = lastMsg
-	return yield(toolResContent, nil)
-}
-
 // ListTools returns a list of exposed tools available in the Hive.
 // This method implements the ToolServer interface from the go-mcp package.
 // It returns only the tools marked as exposed during Hive initialization.
@@ -315,36 +194,147 @@ func (h Hive) llmCaller(
 	}
 }
 
-func (h Hive) callLLM(ctx context.Context, llm LLM, messages []Message, tools []mcp.Tool) iter.Seq2[Content, error] {
+//nolint:gocognit,funlen // TODO: Refactor this function
+func (h Hive) callLLM(
+	ctx context.Context,
+	llm LLM,
+	messages []Message,
+	tools []mcp.Tool,
+) iter.Seq2[Content, error] {
 	return func(yield func(Content, error) bool) {
-		// Check if LLM is properly configured
 		if llm == nil {
 			yield(Content{}, errors.New("llm is not set"))
 			return
 		}
 
-		// Initialize conversation with a new assistant message
-		conversation := initializeConversation(messages)
-		lastMsgIndex := len(conversation) - 1
+		// Create a copy of messages and add an assistant message to build the response
+		currentMessages := make([]Message, len(messages)+1)
+		copy(currentMessages, messages)
+		currentMessages[len(messages)] = Message{
+			Role: RoleAssistant,
+		}
+		lastMsgIndex := len(currentMessages) - 1
+		lastMsg := currentMessages[lastMsgIndex]
 
 		for {
-			// Process LLM response and handle any content
-			callToolContent, textContent, shouldContinue := processSingleLLMResponse(
-				ctx, llm, conversation, tools, yield)
+			// Call the LLM with the current conversation state and available tools
+			llmIter := llm.Call(ctx, currentMessages, tools)
+			var textContent, callToolContent Content
+			textContent.Type = ContentTypeText
+			callTool := false
+			badToolInputFlag := false
 
-			// Break if no tool call or if stream was interrupted
-			if callToolContent.Type != ContentTypeCallTool || !shouldContinue {
-				if textContent.Text != "" && shouldContinue {
+			for content, err := range llmIter {
+				if err != nil {
+					yield(Content{}, fmt.Errorf("failed to call llm: %w", err))
+					return
+				}
+
+				// Process different content types from the LLM's response
+				switch content.Type {
+				case ContentTypeText:
+					textContent.Text += content.Text
+				case ContentTypeCallTool:
+					// If we have accumulated text before this tool call, yield it first
+					if textContent.Text != "" {
+						lastMsg.Contents = append(lastMsg.Contents, textContent)
+						if !yield(textContent, nil) {
+							return
+						}
+						textContent = Content{
+							Type: ContentTypeText,
+							Text: "",
+						}
+					}
+					// Validate the tool input is valid JSON
+					_, err := json.Marshal(content.ToolInput)
+					if err != nil {
+						badToolInputFlag = true
+					}
+					callTool = true
+					callToolContent = content
+				case ContentTypeToolResult:
+					yield(Content{}, fmt.Errorf("content type tool result not allowed"))
+					return
+				default:
+					yield(Content{}, fmt.Errorf("unknown content type: %s", content.Type))
+					return
+				}
+
+				if callTool {
+					break
+				}
+			}
+
+			// If the LLM completed its response without requesting a tool, we're done
+			if !callTool {
+				if textContent.Text != "" {
 					yield(textContent, nil)
 				}
 				break
 			}
 
-			// Handle tool call and update conversation
-			shouldContinue = handleToolCall(
-				ctx, h, conversation, lastMsgIndex, callToolContent, yield)
-			if !shouldContinue {
-				break
+			// Record the tool call in the conversation history
+			lastMsg.Contents = append(lastMsg.Contents, callToolContent)
+			if !yield(callToolContent, nil) {
+				return
+			}
+
+			// Set up the tool result content to be added to the conversation
+			toolResContent := Content{
+				Type:       ContentTypeToolResult,
+				CallToolID: callToolContent.CallToolID,
+			}
+
+			// Handle case where tool input was invalid JSON
+			if badToolInputFlag {
+				toolResContent.ToolResult = callToolError(
+					fmt.Errorf("tool input %s is not valid json", string(callToolContent.ToolInput)))
+				toolResContent.CallToolFailed = true
+				lastMsg.Contents = append(lastMsg.Contents, toolResContent)
+				currentMessages[lastMsgIndex] = lastMsg
+				if !yield(toolResContent, nil) {
+					return
+				}
+				continue
+			}
+
+			// Actually call the requested tool and handle any errors
+			toolRes, err := h.callAllTool(ctx, mcp.CallToolParams{
+				Name:      callToolContent.ToolName,
+				Arguments: callToolContent.ToolInput,
+			})
+			if err != nil {
+				toolResContent.ToolResult = callToolError(err)
+				toolResContent.CallToolFailed = true
+				lastMsg.Contents = append(lastMsg.Contents, toolResContent)
+				currentMessages[lastMsgIndex] = lastMsg
+				if !yield(toolResContent, nil) {
+					return
+				}
+				continue
+			}
+
+			// Convert the successful tool result to JSON
+			resContent, err := json.Marshal(toolRes.Content)
+			if err != nil {
+				toolResContent.ToolResult = callToolError(err)
+				toolResContent.CallToolFailed = true
+				lastMsg.Contents = append(lastMsg.Contents, toolResContent)
+				currentMessages[lastMsgIndex] = lastMsg
+				if !yield(toolResContent, nil) {
+					return
+				}
+				continue
+			}
+
+			// Add the successful tool result to the conversation and continue the loop
+			toolResContent.ToolResult = resContent
+			toolResContent.CallToolFailed = false
+			lastMsg.Contents = append(lastMsg.Contents, toolResContent)
+			currentMessages[lastMsgIndex] = lastMsg
+			if !yield(toolResContent, nil) {
+				return
 			}
 		}
 	}
