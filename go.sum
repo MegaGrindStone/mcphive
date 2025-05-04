@@ -1,0 +1,10 @@
+github.com/MegaGrindStone/go-mcp v0.6.1 h1:yg77PxFUTz0ZytwIJJWCjkWy02lw4gz4oWFNSzSRJ7Y=
+github.com/MegaGrindStone/go-mcp v0.6.1/go.mod h1:Lc+AiPnsHAF/U9acWMilgzKg4hdkzPpymscNrOysMHM=
+github.com/MegaGrindStone/go-mcp v0.6.2 h1:LbeJ859c1xGZlLLtv1LrVKuyRIOGTOf79klUzal0J5c=
+github.com/MegaGrindStone/go-mcp v0.6.2/go.mod h1:Lc+AiPnsHAF/U9acWMilgzKg4hdkzPpymscNrOysMHM=
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/sashabaranov/go-openai v1.39.1 h1:TMD4w77Iy9WTFlgnjNaxbAASdsCJ9R/rMdzL+SN14oU=
+github.com/sashabaranov/go-openai v1.39.1/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=
+github.com/tmaxmax/go-sse v0.10.0 h1:j9F93WB4Hxt8wUf6oGffMm4dutALvUPoDDxfuDQOSqA=
+github.com/tmaxmax/go-sse v0.10.0/go.mod h1:u/2kZQR1tyngo1lKaNCj1mJmhXGZWS1Zs5yiSOD+Eg8=
