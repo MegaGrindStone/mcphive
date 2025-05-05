@@ -124,7 +124,7 @@ func processLLMIter(llmIter iter.Seq2[Content, error]) (Content, Content, bool, 
 			if err != nil {
 				badToolInputFlag = true
 			}
-			return textContent, content, badToolInputFlag, true, nil
+			return textContent, content, true, badToolInputFlag, nil
 		case ContentTypeToolResult:
 			return Content{}, Content{}, false, false, fmt.Errorf("content type tool result not allowed")
 		default:
