@@ -194,6 +194,66 @@ func TestLLMIntegration(t *testing.T) {
 	}
 }
 
+func TestLLMTextFollowedByToolCall(t *testing.T) {
+	// Create a mock LLM that sends text followed by a tool call
+	mockLLM := &mockLLM{
+		responses: []mcphive.Content{
+			{
+				Type: mcphive.ContentTypeText,
+				Text: "I'm thinking about this question...",
+			},
+			{
+				Type:       mcphive.ContentTypeCallTool,
+				ToolName:   "echo",
+				ToolInput:  json.RawMessage(`{"message":"Let me echo this message"}`),
+				CallToolID: "call1",
+			},
+		},
+	}
+
+	// Create tools
+	echoTool := mcphive.NewTool(mcp.Tool{
+		Name:        "echo",
+		Description: "Echoes back the input",
+	}, echoToolHandler, true)
+
+	llmTool := mcphive.NewTool(mcp.Tool{
+		Name:        "llm_with_tool_call",
+		Description: "Uses LLM that sends text followed by a tool call",
+	}, llmToolHandler, true, mcphive.WithLLM(mockLLM))
+
+	// Create hive
+	hive, err := mcphive.New([]mcphive.Tool{echoTool, llmTool})
+	if err != nil {
+		t.Fatalf("Failed to create Hive: %v", err)
+	}
+
+	// Call the tool
+	paramsJSON, _ := json.Marshal(map[string]string{
+		"message": "Please process with echo",
+	})
+
+	result, err := hive.CallInternalTool(context.Background(), mcp.CallToolParams{
+		Name:      "llm_with_tool_call",
+		Arguments: paramsJSON,
+	})
+	if err != nil {
+		t.Fatalf("CallInternalTool failed: %v", err)
+	}
+
+	// Verify the result
+	// The result should contain just the text content from the LLM
+	if len(result.Content) != 1 || result.Content[0].Type != mcp.ContentTypeText {
+		t.Fatalf("Expected 1 text content, got: %v", result.Content)
+	}
+
+	// The text should be the text from the LLM's response
+	expectedText := "I'm thinking about this question..."
+	if result.Content[0].Text != expectedText {
+		t.Errorf("Expected text '%s', got '%s'", expectedText, result.Content[0].Text)
+	}
+}
+
 func TestToolWithToolFiltering(t *testing.T) {
 	// Create tools
 	echoTool := mcphive.NewTool(mcp.Tool{
@@ -359,7 +419,11 @@ func llmToolHandler(ctx context.Context, args mcphive.HandleArgs) (mcp.CallToolR
 	}, nil
 }
 
-func (m *mockLLM) Call(_ context.Context, _ []mcphive.Message, tools []mcp.Tool) iter.Seq2[mcphive.Content, error] {
+func (m *mockLLM) Call(
+	_ context.Context,
+	messages []mcphive.Message,
+	tools []mcp.Tool,
+) iter.Seq2[mcphive.Content, error] {
 	return func(yield func(mcphive.Content, error) bool) {
 		if m.err != nil {
 			yield(mcphive.Content{}, m.err)
@@ -388,6 +452,20 @@ func (m *mockLLM) Call(_ context.Context, _ []mcphive.Message, tools []mcp.Tool)
 				}
 				if !found {
 					m.t.Errorf("LLM did not receive expected tool '%s'", expected)
+				}
+			}
+		}
+
+		// Check if we already processed a tool call by examining the last message
+		if len(messages) > 0 {
+			lastMessage := messages[len(messages)-1]
+			// If the last message has contents and the last content is a tool result,
+			// don't issue the same tool call again
+			if len(lastMessage.Contents) > 0 {
+				lastContent := lastMessage.Contents[len(lastMessage.Contents)-1]
+				if lastContent.Type == mcphive.ContentTypeToolResult {
+					// Immediately return
+					return
 				}
 			}
 		}

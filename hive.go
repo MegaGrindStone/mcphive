@@ -104,6 +104,37 @@ func WithLogger(logger *slog.Logger) Options {
 	}
 }
 
+func processLLMIter(llmIter iter.Seq2[Content, error]) (Content, Content, bool, bool, error) {
+	var textContent Content
+	textContent.Type = ContentTypeText
+	badToolInputFlag := false
+
+	for content, err := range llmIter {
+		if err != nil {
+			return Content{}, Content{}, false, false, fmt.Errorf("failed to call llm: %w", err)
+		}
+
+		// Process different content types from the LLM's response
+		switch content.Type {
+		case ContentTypeText:
+			textContent.Text += content.Text
+		case ContentTypeCallTool:
+			// Validate the tool input is valid JSON
+			_, err := json.Marshal(content.ToolInput)
+			if err != nil {
+				badToolInputFlag = true
+			}
+			return textContent, content, badToolInputFlag, true, nil
+		case ContentTypeToolResult:
+			return Content{}, Content{}, false, false, fmt.Errorf("content type tool result not allowed")
+		default:
+			return Content{}, Content{}, false, false, fmt.Errorf("unknown content type: %s", content.Type)
+		}
+	}
+
+	return textContent, Content{}, false, false, nil
+}
+
 func callToolError(err error) json.RawMessage {
 	contents := []mcp.Content{
 		{
@@ -194,7 +225,6 @@ func (h Hive) llmCaller(
 	}
 }
 
-//nolint:gocognit,funlen // TODO: Refactor this function
 func (h Hive) callLLM(
 	ctx context.Context,
 	llm LLM,
@@ -219,58 +249,20 @@ func (h Hive) callLLM(
 		for {
 			// Call the LLM with the current conversation state and available tools
 			llmIter := llm.Call(ctx, currentMessages, tools)
-			var textContent, callToolContent Content
-			textContent.Type = ContentTypeText
-			callTool := false
-			badToolInputFlag := false
 
-			for content, err := range llmIter {
-				if err != nil {
-					yield(Content{}, fmt.Errorf("failed to call llm: %w", err))
-					return
-				}
+			textContent, callToolContent, callTool, badToolInputFlag, err := processLLMIter(llmIter)
+			if err != nil {
+				yield(Content{}, err)
+				return
+			}
 
-				// Process different content types from the LLM's response
-				switch content.Type {
-				case ContentTypeText:
-					textContent.Text += content.Text
-				case ContentTypeCallTool:
-					// If we have accumulated text before this tool call, yield it first
-					if textContent.Text != "" {
-						lastMsg.Contents = append(lastMsg.Contents, textContent)
-						if !yield(textContent, nil) {
-							return
-						}
-						textContent = Content{
-							Type: ContentTypeText,
-							Text: "",
-						}
-					}
-					// Validate the tool input is valid JSON
-					_, err := json.Marshal(content.ToolInput)
-					if err != nil {
-						badToolInputFlag = true
-					}
-					callTool = true
-					callToolContent = content
-				case ContentTypeToolResult:
-					yield(Content{}, fmt.Errorf("content type tool result not allowed"))
+			if textContent.Text != "" {
+				if !yield(textContent, nil) {
 					return
-				default:
-					yield(Content{}, fmt.Errorf("unknown content type: %s", content.Type))
-					return
-				}
-
-				if callTool {
-					break
 				}
 			}
 
-			// If the LLM completed its response without requesting a tool, we're done
 			if !callTool {
-				if textContent.Text != "" {
-					yield(textContent, nil)
-				}
 				break
 			}
 
