@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
+	"net/http"
+	"time"
 
 	"github.com/MegaGrindStone/go-mcp"
 )
@@ -24,6 +27,9 @@ type Hive struct {
 	internalToolsMap map[string]Tool // Map of tool names to tools
 	externalToolsMap map[string]int  // Map of tool names to mcpClient indices
 
+	mcpServer  mcp.Server
+	httpServer *http.Server
+
 	logger *slog.Logger
 }
 
@@ -37,16 +43,16 @@ var errToolNotFound = errors.New("tool not found")
 // The tools parameter is a slice of Tool instances to be registered with the Hive.
 // Additional options can be provided to further configure the Hive's behavior.
 // It returns an initialized Hive or an error if configuration fails.
-func New(tools []Tool, options ...Options) (Hive, error) {
-	h := Hive{
+func New(tools []Tool, options ...Options) (*Hive, error) {
+	h := &Hive{
 		tools:            tools,
 		internalToolsMap: make(map[string]Tool),
 		externalToolsMap: make(map[string]int),
 	}
 
 	for _, opt := range options {
-		if err := opt(&h); err != nil {
-			return Hive{}, fmt.Errorf("error applying option: %w", err)
+		if err := opt(h); err != nil {
+			return nil, fmt.Errorf("error applying option: %w", err)
 		}
 	}
 
@@ -154,7 +160,7 @@ func callToolError(err error) json.RawMessage {
 // are part of the interface but unused in this implementation.
 // The method always returns a ListToolsResult containing the list of available exposed tools
 // with no error.
-func (h Hive) ListTools(
+func (h *Hive) ListTools(
 	context.Context,
 	mcp.ListToolsParams,
 	mcp.ProgressReporter,
@@ -172,7 +178,7 @@ func (h Hive) ListTools(
 // The progress reporter and request client function are part of the interface but unused.
 // It returns a CallToolResult containing the tool execution result or an error if the tool
 // is not found or if execution fails.
-func (h Hive) CallTool(
+func (h *Hive) CallTool(
 	ctx context.Context,
 	params mcp.CallToolParams,
 	_ mcp.ProgressReporter,
@@ -194,7 +200,7 @@ func (h Hive) CallTool(
 // for cancellation, and params contains the tool name and arguments to pass to the tool.
 // It returns a CallToolResult containing the tool execution result or errToolNotFound if
 // the tool is not found. Other errors may be returned if the execution fails.
-func (h Hive) CallInternalTool(ctx context.Context, params mcp.CallToolParams) (mcp.CallToolResult, error) {
+func (h *Hive) CallInternalTool(ctx context.Context, params mcp.CallToolParams) (mcp.CallToolResult, error) {
 	internalTool, ok := h.internalToolsMap[params.Name]
 	if !ok {
 		return mcp.CallToolResult{}, errToolNotFound
@@ -216,7 +222,87 @@ func (h Hive) CallInternalTool(ctx context.Context, params mcp.CallToolParams) (
 	return internalTool.handle(ctx, args)
 }
 
-func (h Hive) llmCaller(
+// ServeSSE starts the Hive as an SSE (Server-Sent Events) server on the specified port.
+// It initializes an MCP server using the provided info and configures HTTP handlers for
+// SSE communication. The server runs until an error occurs or until explicitly shut down.
+// The info parameter defines server identification and capabilities.
+// The port parameter specifies which TCP port to listen on.
+// It returns an error if the HTTP server fails to start or encounters an error while running.
+func (h *Hive) ServeSSE(info mcp.Info, port int) error {
+	sse := mcp.NewSSEServer("/message", mcp.WithSSEServerLogger(h.logger))
+
+	go h.serve(info, sse)
+
+	h.httpServer = &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	http.Handle("/sse", sse.HandleSSE())
+	http.Handle("/message", sse.HandleMessage())
+
+	h.logger.Info("Hive is serving on port", slog.Int("port", port))
+
+	return h.httpServer.ListenAndServe()
+}
+
+// ServeStdIO starts the Hive as a standard I/O server using the provided reader and writer.
+// It initializes an MCP server using the provided info and configures it to communicate
+// through the given standard I/O streams. This method blocks until the server is shut down.
+// The info parameter defines server identification and capabilities.
+// The reader parameter is the input stream for receiving messages.
+// The writer parameter is the output stream for sending responses.
+func (h *Hive) ServeStdIO(info mcp.Info, reader io.Reader, writer io.Writer) {
+	srvIO := mcp.NewStdIO(reader, writer, mcp.WithStdIOLogger(h.logger))
+
+	h.serve(info, srvIO)
+}
+
+// ShutdownSSE gracefully stops the SSE server and associated MCP server.
+// It attempts to complete all in-flight requests and connections before shutting down,
+// with a timeout of 10 seconds. Both the MCP server and HTTP server are shut down in sequence.
+// It returns an error if either server fails to shut down properly within the timeout period.
+func (h *Hive) ShutdownSSE() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := h.mcpServer.Shutdown(ctx); err != nil {
+		h.logger.Error("failed to shutdown mcp server", slog.String("err", err.Error()))
+		return err
+	}
+
+	if err := h.httpServer.Shutdown(ctx); err != nil {
+		h.logger.Error("failed to shutdown http server", slog.String("err", err.Error()))
+		return err
+	}
+
+	return nil
+}
+
+// ShutdownStdIO gracefully stops the standard I/O server.
+// It attempts to complete all in-flight requests before shutting down,
+// with a timeout of 10 seconds. Only the MCP server needs to be shut down
+// for StdIO mode since there is no separate HTTP server.
+// It returns an error if the server fails to shut down properly within the timeout period.
+func (h *Hive) ShutdownStdIO() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := h.mcpServer.Shutdown(ctx); err != nil {
+		h.logger.Error("failed to shutdown mcp server", slog.String("err", err.Error()))
+		return err
+	}
+
+	return nil
+}
+
+func (h *Hive) serve(info mcp.Info, transport mcp.ServerTransport) {
+	h.mcpServer = mcp.NewServer(info, transport,
+		mcp.WithToolServer(h), mcp.WithServerLogger(h.logger))
+	h.mcpServer.Serve()
+}
+
+func (h *Hive) llmCaller(
 	llm LLM,
 	tools []mcp.Tool,
 ) func(ctx context.Context, messages []Message) iter.Seq2[Content, error] {
@@ -225,7 +311,7 @@ func (h Hive) llmCaller(
 	}
 }
 
-func (h Hive) callLLM(
+func (h *Hive) callLLM(
 	ctx context.Context,
 	llm LLM,
 	messages []Message,
@@ -332,7 +418,7 @@ func (h Hive) callLLM(
 	}
 }
 
-func (h Hive) callAllTool(ctx context.Context, params mcp.CallToolParams) (mcp.CallToolResult, error) {
+func (h *Hive) callAllTool(ctx context.Context, params mcp.CallToolParams) (mcp.CallToolResult, error) {
 	res, err := h.CallInternalTool(ctx, params)
 	if err != nil {
 		if !errors.Is(err, errToolNotFound) {
