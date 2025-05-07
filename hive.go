@@ -19,10 +19,12 @@ import (
 // invocation, and interactions between tools and language models. Hive manages tool permissions
 // and provides a unified interface for accessing both local and remote tool capabilities.
 type Hive struct {
-	tools           []Tool
-	mcpClients      []*mcp.Client
-	exposedMCPTools []mcp.Tool
-	mcpTools        []mcp.Tool
+	info             mcp.Info
+	tools            []Tool
+	mcpClients       []*mcp.Client
+	exposedMCPTools  []mcp.Tool
+	mcpTools         []mcp.Tool
+	mcpClientConfigs []MCPClientConfig
 
 	internalToolsMap map[string]Tool // Map of tool names to tools
 	externalToolsMap map[string]int  // Map of tool names to mcpClient indices
@@ -35,29 +37,37 @@ type Hive struct {
 
 // Options is a function type used for configuring a Hive instance through the builder pattern.
 // It allows for modular addition of features and dependencies to the Hive.
-type Options func(hive *Hive) error
+type Options func(hive *Hive)
 
 var errToolNotFound = errors.New("tool not found")
 
 // New creates a new Hive instance with the specified tools and configuration options.
+// The info parameter provides identification and capability information for the Hive.
 // The tools parameter is a slice of Tool instances to be registered with the Hive.
 // Additional options can be provided to further configure the Hive's behavior.
 // It returns an initialized Hive or an error if configuration fails.
-func New(tools []Tool, options ...Options) (*Hive, error) {
+func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 	h := &Hive{
+		info:             info,
 		tools:            tools,
 		internalToolsMap: make(map[string]Tool),
 		externalToolsMap: make(map[string]int),
 	}
 
 	for _, opt := range options {
-		if err := opt(h); err != nil {
-			return nil, fmt.Errorf("error applying option: %w", err)
-		}
+		opt(h)
 	}
 
 	if h.logger == nil {
 		h.logger = slog.Default()
+	}
+
+	for _, cliConfig := range h.mcpClientConfigs {
+		cli, err := cliConfig.MCPClient(info, h.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MCP client: %w", err)
+		}
+		h.mcpClients = append(h.mcpClients, cli)
 	}
 
 	for _, tool := range tools {
@@ -72,31 +82,14 @@ func New(tools []Tool, options ...Options) (*Hive, error) {
 	return h, nil
 }
 
-// WithExternalMCPClients returns an Options function that adds external MCP clients to the Hive.
-// The clients parameter is a slice of MCP clients whose tools will be made available through the Hive.
-// When this option is applied, the Hive will discover and register tools from these external clients,
-// allowing them to be invoked alongside internal tools.
-func WithExternalMCPClients(clients []*mcp.Client) Options {
-	return func(hive *Hive) error {
-		for _, cli := range clients {
-			serverInfo := cli.ServerInfo()
-
-			if !cli.ToolServerSupported() {
-				continue
-			}
-
-			listTools, err := cli.ListTools(context.Background(), mcp.ListToolsParams{})
-			if err != nil {
-				return fmt.Errorf("failed to list tools from server %s: %w", serverInfo.Name, err)
-			}
-			for _, tool := range listTools.Tools {
-				hive.externalToolsMap[tool.Name] = len(hive.mcpClients)
-				hive.mcpTools = append(hive.mcpTools, tool)
-			}
-
-			hive.mcpClients = append(hive.mcpClients, cli)
-		}
-		return nil
+// WithExternalMCPClients returns an Options function that adds external MCP client configurations to the Hive.
+// The configs parameter is a slice of MCPClientConfig implementations that specify how to create
+// and manage connections to external MCP-compatible services.
+// When this option is applied, the Hive will establish connections to these external services,
+// discover their available tools, and register them for use alongside internal tools.
+func WithExternalMCPClients(configs []MCPClientConfig) Options {
+	return func(hive *Hive) {
+		hive.mcpClientConfigs = append(hive.mcpClientConfigs, configs...)
 	}
 }
 
@@ -104,9 +97,8 @@ func WithExternalMCPClients(clients []*mcp.Client) Options {
 // The logger parameter is the slog.Logger instance that will be used for logging operations within the Hive.
 // If not provided, the Hive will default to using slog.Default().
 func WithLogger(logger *slog.Logger) Options {
-	return func(hive *Hive) error {
+	return func(hive *Hive) {
 		hive.logger = logger
-		return nil
 	}
 }
 
@@ -223,15 +215,14 @@ func (h *Hive) CallInternalTool(ctx context.Context, params mcp.CallToolParams) 
 }
 
 // ServeSSE starts the Hive as an SSE (Server-Sent Events) server on the specified port.
-// It initializes an MCP server using the provided info and configures HTTP handlers for
+// It initializes an MCP server using the Hive's info and configures HTTP handlers for
 // SSE communication. The server runs until an error occurs or until explicitly shut down.
-// The info parameter defines server identification and capabilities.
 // The port parameter specifies which TCP port to listen on.
 // It returns an error if the HTTP server fails to start or encounters an error while running.
-func (h *Hive) ServeSSE(info mcp.Info, port int) error {
+func (h *Hive) ServeSSE(port int) error {
 	sse := mcp.NewSSEServer("/message", mcp.WithSSEServerLogger(h.logger))
 
-	go h.serve(info, sse)
+	go h.serve(sse)
 
 	h.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
@@ -247,15 +238,14 @@ func (h *Hive) ServeSSE(info mcp.Info, port int) error {
 }
 
 // ServeStdIO starts the Hive as a standard I/O server using the provided reader and writer.
-// It initializes an MCP server using the provided info and configures it to communicate
+// It initializes an MCP server using the Hive's info and configures it to communicate
 // through the given standard I/O streams. This method blocks until the server is shut down.
-// The info parameter defines server identification and capabilities.
 // The reader parameter is the input stream for receiving messages.
 // The writer parameter is the output stream for sending responses.
-func (h *Hive) ServeStdIO(info mcp.Info, reader io.Reader, writer io.Writer) {
+func (h *Hive) ServeStdIO(reader io.Reader, writer io.Writer) {
 	srvIO := mcp.NewStdIO(reader, writer, mcp.WithStdIOLogger(h.logger))
 
-	h.serve(info, srvIO)
+	h.serve(srvIO)
 }
 
 // ShutdownSSE gracefully stops the SSE server and associated MCP server.
@@ -276,6 +266,11 @@ func (h *Hive) ShutdownSSE() error {
 		return err
 	}
 
+	if err := h.disconnectMCPClients(ctx); err != nil {
+		h.logger.Error("failed to disconnect MCP clients", slog.String("err", err.Error()))
+		return err
+	}
+
 	return nil
 }
 
@@ -293,13 +288,32 @@ func (h *Hive) ShutdownStdIO() error {
 		return err
 	}
 
+	if err := h.disconnectMCPClients(ctx); err != nil {
+		h.logger.Error("failed to disconnect MCP clients", slog.String("err", err.Error()))
+		return err
+	}
+
 	return nil
 }
 
-func (h *Hive) serve(info mcp.Info, transport mcp.ServerTransport) {
-	h.mcpServer = mcp.NewServer(info, transport,
+func (h *Hive) serve(transport mcp.ServerTransport) {
+	h.mcpServer = mcp.NewServer(h.info, transport,
 		mcp.WithToolServer(h), mcp.WithServerLogger(h.logger))
 	h.mcpServer.Serve()
+}
+
+func (h *Hive) disconnectMCPClients(ctx context.Context) error {
+	for _, cliConfig := range h.mcpClientConfigs {
+		if err := cliConfig.Shutdown(); err != nil {
+			return fmt.Errorf("failed to shutdown MCP client: %w", err)
+		}
+	}
+	for _, cli := range h.mcpClients {
+		if err := cli.Disconnect(ctx); err != nil {
+			return fmt.Errorf("failed to disconnect MCP client: %w", err)
+		}
+	}
+	return nil
 }
 
 func (h *Hive) llmCaller(

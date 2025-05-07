@@ -31,14 +31,14 @@ func TestHiveNew(t *testing.T) {
 	}, echoToolHandler, true)
 
 	// Test with single tool
-	_, err := mcphive.New([]mcphive.Tool{echoTool})
+	_, err := mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
 
 	// Test with logger option
 	logger := slog.Default()
-	_, err = mcphive.New([]mcphive.Tool{echoTool}, mcphive.WithLogger(logger))
+	_, err = mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool}, mcphive.WithLogger(logger))
 	if err != nil {
 		t.Fatalf("Failed to create Hive with logger: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestHiveCallInternalTool(t *testing.T) {
 	}, errorToolHandler, true)
 
 	// Create hive
-	hive, err := mcphive.New([]mcphive.Tool{echoTool, errorTool})
+	hive, err := mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool, errorTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestToolChaining(t *testing.T) {
 	}, chainToolHandler, true)
 
 	// Create hive
-	hive, err := mcphive.New([]mcphive.Tool{echoTool, chainTool})
+	hive, err := mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool, chainTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestLLMIntegration(t *testing.T) {
 	}, llmToolHandler, true, mcphive.WithLLM(mockLLM))
 
 	// Create hive
-	hive, err := mcphive.New([]mcphive.Tool{llmTool})
+	hive, err := mcphive.New(mcp.Info{}, []mcphive.Tool{llmTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestLLMTextFollowedByToolCall(t *testing.T) {
 	}, llmToolHandler, true, mcphive.WithLLM(mockLLM))
 
 	// Create hive
-	hive, err := mcphive.New([]mcphive.Tool{echoTool, llmTool})
+	hive, err := mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool, llmTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestToolWithToolFiltering(t *testing.T) {
 		mcphive.WithExcludedTools([]string{"echo"}))
 
 	// Create hive with all tools
-	hive, err := mcphive.New([]mcphive.Tool{echoTool, pingTool, restrictedTool, llmTool})
+	hive, err := mcphive.New(mcp.Info{}, []mcphive.Tool{echoTool, pingTool, restrictedTool, llmTool})
 	if err != nil {
 		t.Fatalf("Failed to create Hive: %v", err)
 	}
