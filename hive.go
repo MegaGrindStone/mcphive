@@ -76,7 +76,7 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		connectCancel()
 
 		h.mcpClients = append(h.mcpClients, cli)
-		toolIndex := len(h.mcpTools) - 1
+		toolIndex := len(h.mcpClients) - 1
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		exTools, err := cli.ListTools(listCtx, mcp.ListToolsParams{})
