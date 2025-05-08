@@ -522,11 +522,19 @@ func (h *Hive) onPingFailed(index int, err error) {
 		h.logger.Error("failed to disconnect MCP client", slog.String("err", err.Error()))
 	}
 
+	cli, err := h.mcpClientConfigs[index].MCPClient(h.info, index, h.onPingFailed, h.logger)
+	if err != nil {
+		h.logger.Error("failed to create MCP client", slog.String("err", err.Error()))
+		return
+	}
+
 	connectCtx, connectCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer connectCancel()
 
-	if err := h.mcpClients[index].Connect(connectCtx); err != nil {
+	if err := cli.Connect(connectCtx); err != nil {
 		h.logger.Error("failed to reconnect MCP client", slog.String("err", err.Error()))
 		return
 	}
+
+	h.mcpClients[index] = cli
 }
