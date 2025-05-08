@@ -9,6 +9,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/MegaGrindStone/go-mcp"
@@ -21,7 +22,6 @@ import (
 type Hive struct {
 	info             mcp.Info
 	tools            []Tool
-	mcpClients       []*mcp.Client
 	exposedMCPTools  []mcp.Tool
 	mcpTools         []mcp.Tool
 	mcpClientConfigs []MCPClientConfig
@@ -33,6 +33,10 @@ type Hive struct {
 	httpServer *http.Server
 
 	logger *slog.Logger
+
+	clientsLock       sync.Mutex
+	mcpClients        []*mcp.Client
+	clientPingCounter []int
 }
 
 // Options is a function type used for configuring a Hive instance through the builder pattern.
@@ -52,6 +56,7 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		tools:            tools,
 		internalToolsMap: make(map[string]Tool),
 		externalToolsMap: make(map[string]int),
+		clientsLock:      sync.Mutex{},
 	}
 
 	for _, opt := range options {
@@ -62,8 +67,8 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		h.logger = slog.Default()
 	}
 
-	for _, cliConfig := range h.mcpClientConfigs {
-		cli, err := cliConfig.MCPClient(info, h.logger)
+	for i, cliConfig := range h.mcpClientConfigs {
+		cli, err := cliConfig.MCPClient(info, i, h.onPingFailed, h.logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create MCP client: %w", err)
 		}
@@ -76,7 +81,8 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		connectCancel()
 
 		h.mcpClients = append(h.mcpClients, cli)
-		toolIndex := len(h.mcpClients) - 1
+		h.clientPingCounter = append(h.clientPingCounter, 0)
+		toolIndex := i
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		exTools, err := cli.ListTools(listCtx, mcp.ListToolsParams{})
@@ -247,6 +253,9 @@ func (h *Hive) CallExternalTool(ctx context.Context, params mcp.CallToolParams) 
 	if !ok {
 		return mcp.CallToolResult{}, fmt.Errorf("tool %s not found in external tools map", params.Name)
 	}
+
+	h.clientsLock.Lock()
+	defer h.clientsLock.Unlock()
 
 	mcpClient := h.mcpClients[clientIdx]
 	return mcpClient.CallTool(ctx, params)
@@ -483,4 +492,41 @@ func (h *Hive) callAllTool(ctx context.Context, params mcp.CallToolParams) (mcp.
 	}
 
 	return h.CallExternalTool(ctx, params)
+}
+
+func (h *Hive) onPingFailed(index int, err error) {
+	h.clientsLock.Lock()
+	defer h.clientsLock.Unlock()
+
+	if index >= len(h.clientPingCounter) {
+		return
+	}
+
+	count := h.clientPingCounter[index]
+
+	h.logger.Error("MCP client ping failed",
+		slog.Int("index", index),
+		slog.Int("count", count),
+		slog.String("err", err.Error()))
+	if count < 3 {
+		h.clientPingCounter[index]++
+		return
+	}
+
+	h.logger.Warn("MCP client ping failed too many times, reconnecting")
+
+	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer disconnectCancel()
+
+	if err := h.mcpClients[index].Disconnect(disconnectCtx); err != nil {
+		h.logger.Error("failed to disconnect MCP client", slog.String("err", err.Error()))
+	}
+
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer connectCancel()
+
+	if err := h.mcpClients[index].Connect(connectCtx); err != nil {
+		h.logger.Error("failed to reconnect MCP client", slog.String("err", err.Error()))
+		return
+	}
 }

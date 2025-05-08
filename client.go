@@ -13,7 +13,7 @@ import (
 // Implementations must provide methods to create an MCP client and shutdown
 // any resources associated with the client.
 type MCPClientConfig interface {
-	MCPClient(info mcp.Info, logger *slog.Logger) (*mcp.Client, error)
+	MCPClient(info mcp.Info, index int, onPingFailed func(int, error), logger *slog.Logger) (*mcp.Client, error)
 	Shutdown() error
 }
 
@@ -37,13 +37,25 @@ type MCPStdIOClient struct {
 
 // MCPClient creates a new MCP client that communicates via SSE.
 // It initializes an SSE client with the configured URL and payload size,
-// then wraps it in an MCP client with the provided info and logger.
+// then wraps it in an MCP client with the provided info, index, and logger.
+// The index parameter identifies the client's position in a collection of clients.
+// The onPingFailed callback is invoked when ping operations fail, receiving the client index and error.
 // Returns the configured client or an error if initialization fails.
-func (m MCPSSEClient) MCPClient(info mcp.Info, logger *slog.Logger) (*mcp.Client, error) {
+func (m MCPSSEClient) MCPClient(
+	info mcp.Info,
+	index int,
+	onPingFailed func(int, error),
+	logger *slog.Logger,
+) (*mcp.Client, error) {
 	sseClient := mcp.NewSSEClient(m.URL, nil,
 		mcp.WithSSEClientMaxPayloadSize(m.MaxPayloadSize),
 		mcp.WithSSEClientLogger(logger))
-	return mcp.NewClient(info, sseClient, mcp.WithClientLogger(logger)), nil
+	return mcp.NewClient(info, sseClient,
+		mcp.WithClientOnPingFailed(func(err error) {
+			onPingFailed(index, err)
+		}),
+		mcp.WithClientLogger(logger),
+	), nil
 }
 
 // Shutdown performs necessary cleanup for the SSE client.
@@ -56,9 +68,16 @@ func (m MCPSSEClient) Shutdown() error {
 // MCPClient creates a new MCP client that communicates via standard I/O.
 // It executes the configured command, establishes pipes for stdin/stdout/stderr,
 // and initializes an MCP client to communicate through these pipes.
+// The index parameter identifies the client's position in a collection of clients.
+// The onPingFailed callback is invoked when ping operations fail, receiving the client index and error.
 // The stderr output from the command is logged as errors.
 // Returns the configured client or an error if command execution fails.
-func (m *MCPStdIOClient) MCPClient(info mcp.Info, logger *slog.Logger) (*mcp.Client, error) {
+func (m *MCPStdIOClient) MCPClient(
+	info mcp.Info,
+	index int,
+	onPingFailed func(int, error),
+	logger *slog.Logger,
+) (*mcp.Client, error) {
 	m.cmd = exec.Command(m.Command, m.Args...)
 
 	in, err := m.cmd.StdinPipe()
@@ -88,7 +107,12 @@ func (m *MCPStdIOClient) MCPClient(info mcp.Info, logger *slog.Logger) (*mcp.Cli
 
 	cliStdIO := mcp.NewStdIO(out, in, mcp.WithStdIOLogger(logger))
 
-	return mcp.NewClient(info, cliStdIO, mcp.WithClientLogger(logger)), nil
+	return mcp.NewClient(info, cliStdIO,
+		mcp.WithClientOnPingFailed(func(err error) {
+			onPingFailed(index, err)
+		}),
+		mcp.WithClientLogger(logger),
+	), nil
 }
 
 // Shutdown terminates the external process and cleans up associated resources.
