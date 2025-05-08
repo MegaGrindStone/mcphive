@@ -62,12 +62,25 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		h.logger = slog.Default()
 	}
 
+	ltCtx, ltCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer ltCancel()
+
 	for _, cliConfig := range h.mcpClientConfigs {
 		cli, err := cliConfig.MCPClient(info, h.logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create MCP client: %w", err)
 		}
 		h.mcpClients = append(h.mcpClients, cli)
+		toolIndex := len(h.mcpTools) - 1
+
+		exTools, err := cli.ListTools(ltCtx, mcp.ListToolsParams{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tools: %w", err)
+		}
+		for _, tool := range exTools.Tools {
+			h.externalToolsMap[tool.Name] = toolIndex
+			h.mcpTools = append(h.mcpTools, tool)
+		}
 	}
 
 	for _, tool := range tools {
