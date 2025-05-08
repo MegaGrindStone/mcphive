@@ -336,7 +336,9 @@ func (h *Hive) ShutdownStdIO() error {
 
 func (h *Hive) serve(transport mcp.ServerTransport) {
 	h.mcpServer = mcp.NewServer(h.info, transport,
-		mcp.WithToolServer(h), mcp.WithServerLogger(h.logger))
+		mcp.WithToolServer(h),
+		mcp.WithServerPingTimeoutThreshold(3),
+		mcp.WithServerLogger(h.logger))
 	h.mcpServer.Serve()
 }
 
