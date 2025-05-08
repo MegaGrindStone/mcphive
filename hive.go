@@ -214,6 +214,22 @@ func (h *Hive) CallInternalTool(ctx context.Context, params mcp.CallToolParams) 
 	return internalTool.handle(ctx, args)
 }
 
+// CallExternalTool executes a tool from an external MCP client connected to the Hive.
+// It finds the appropriate MCP client by looking up the tool name in the external tools map,
+// then delegates the call to that client. The context is used for cancellation, and params
+// contains the tool name and arguments to pass to the external tool.
+// It returns a CallToolResult containing the tool execution result or an error if the tool
+// is not found in the external tools map or if the external tool execution fails.
+func (h *Hive) CallExternalTool(ctx context.Context, params mcp.CallToolParams) (mcp.CallToolResult, error) {
+	clientIdx, ok := h.externalToolsMap[params.Name]
+	if !ok {
+		return mcp.CallToolResult{}, fmt.Errorf("tool %s not found in external tools map", params.Name)
+	}
+
+	mcpClient := h.mcpClients[clientIdx]
+	return mcpClient.CallTool(ctx, params)
+}
+
 // ServeSSE starts the Hive as an SSE (Server-Sent Events) server on the specified port.
 // It initializes an MCP server using the Hive's info and configures HTTP handlers for
 // SSE communication. The server runs until an error occurs or until explicitly shut down.
@@ -442,11 +458,5 @@ func (h *Hive) callAllTool(ctx context.Context, params mcp.CallToolParams) (mcp.
 		return res, nil
 	}
 
-	clientIdx, ok := h.externalToolsMap[params.Name]
-	if !ok {
-		return mcp.CallToolResult{}, fmt.Errorf("tool %s not found in internal and external tools map", params.Name)
-	}
-
-	mcpClient := h.mcpClients[clientIdx]
-	return mcpClient.CallTool(ctx, params)
+	return h.CallExternalTool(ctx, params)
 }
