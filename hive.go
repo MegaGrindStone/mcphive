@@ -537,4 +537,5 @@ func (h *Hive) onPingFailed(index int, err error) {
 	}
 
 	h.mcpClients[index] = cli
+	h.clientPingCounter[index] = 0
 }
