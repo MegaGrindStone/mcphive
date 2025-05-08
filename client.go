@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"time"
 
 	"github.com/MegaGrindStone/go-mcp"
 )
@@ -51,6 +52,7 @@ func (m MCPSSEClient) MCPClient(
 		mcp.WithSSEClientMaxPayloadSize(m.MaxPayloadSize),
 		mcp.WithSSEClientLogger(logger))
 	return mcp.NewClient(info, sseClient,
+		mcp.WithClientPingTimeout(1*time.Minute),
 		mcp.WithClientOnPingFailed(func(err error) {
 			onPingFailed(index, err)
 		}),
@@ -108,6 +110,7 @@ func (m *MCPStdIOClient) MCPClient(
 	cliStdIO := mcp.NewStdIO(out, in, mcp.WithStdIOLogger(logger))
 
 	return mcp.NewClient(info, cliStdIO,
+		mcp.WithClientPingTimeout(1*time.Minute),
 		mcp.WithClientOnPingFailed(func(err error) {
 			onPingFailed(index, err)
 		}),
