@@ -62,26 +62,30 @@ func New(info mcp.Info, tools []Tool, options ...Options) (*Hive, error) {
 		h.logger = slog.Default()
 	}
 
-	cliConnectDur := time.Duration(5 * len(h.mcpClientConfigs))
-	cliCtx, cliCancel := context.WithTimeout(context.Background(), cliConnectDur)
-	defer cliCancel()
-
 	for _, cliConfig := range h.mcpClientConfigs {
 		cli, err := cliConfig.MCPClient(info, h.logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create MCP client: %w", err)
 		}
-		if err := cli.Connect(cliCtx); err != nil {
-			return nil, fmt.Errorf("failed to connect to MCP client: %w", err)
+
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := cli.Connect(connectCtx); err != nil {
+			connectCancel()
+			return nil, fmt.Errorf("failed to connect to MCP server: %w", err)
 		}
+		connectCancel()
 
 		h.mcpClients = append(h.mcpClients, cli)
 		toolIndex := len(h.mcpTools) - 1
 
-		exTools, err := cli.ListTools(cliCtx, mcp.ListToolsParams{})
+		listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		exTools, err := cli.ListTools(listCtx, mcp.ListToolsParams{})
 		if err != nil {
+			listCancel()
 			return nil, fmt.Errorf("failed to list tools: %w", err)
 		}
+		listCancel()
+
 		for _, tool := range exTools.Tools {
 			h.externalToolsMap[tool.Name] = toolIndex
 			h.mcpTools = append(h.mcpTools, tool)
